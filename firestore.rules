@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==========================================
+    // HELPER FUNCTIONS UNTUK ZERO-BUDGET RBAC
+    // ==========================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Dapatkan role user internal sekolah
+    function getUserRole(schoolId) {
+      return get(/databases/$(database)/documents/schools/$(schoolId)/users/$(request.auth.uid)).data.role;
+    }
+    
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.uid == "5ADGxQycqCYhru0584JkVRap2FW2" ||
+        request.auth.token.role == "super_admin"
+      );
+    }
+    
+    function isSchoolAdmin(schoolId) {
+      return isAuthenticated() && (
+        isSuperAdmin() ||
+        getUserRole(schoolId) == "admin_sekolah" ||
+        request.auth.token.schoolId == schoolId && request.auth.token.role == "admin_sekolah"
+      );
+    }
+    
+    function isPanitiaPPDB(schoolId) {
+      return isAuthenticated() && (
+        isSchoolAdmin(schoolId) ||
+        getUserRole(schoolId) == "panitia_ppdb"
+      );
+    }
+    
+    function isHumas(schoolId) {
+      return isAuthenticated() && (
+        isSchoolAdmin(schoolId) ||
+        getUserRole(schoolId) == "editor_humas"
+      );
+    }
+
+    // ==========================================
+    // 1. DATA SEKOLAH (TENANT DATA)
+    // ==========================================
+    match /schools/{schoolId} {
+      // Publik boleh membaca data profil jika status = published
+      allow read: if resource.data.status == "published" || isSchoolAdmin(schoolId);
+      
+      // Hanya Admin Sekolah / Super Admin yang boleh mengubah konfigurasi tema & halaman
+      allow create: if isSuperAdmin();
+      allow update: if isSchoolAdmin(schoolId);
+      allow delete: if isSuperAdmin();
+      
+      // ==========================================
+      // 2. USER INTERNAL SEKOLAH (STAF/GURU)
+      // ==========================================
+      match /users/{userId} {
+        allow read: if isAuthenticated() && (
+          request.auth.uid == userId || isSchoolAdmin(schoolId)
+        );
+        allow write: if isSchoolAdmin(schoolId);
+      }
+      
+      // ==========================================
+      // 3. ARTIKEL BERITA & PENGUMUMAN
+      // ==========================================
+      match /posts/{postId} {
+        allow read: if true; // Publik bebas membaca berita
+        allow write: if isHumas(schoolId);
+      }
+      
+      // ==========================================
+      // 4. PENDAFTARAN PPDB (CALON SISWA)
+      // ==========================================
+      match /admissions/{admissionId} {
+        // Calon siswa (publik tanpa akun) boleh mendaftar jika data valid
+        allow create: if request.resource.data.student.fullName != null &&
+                         request.resource.data.student.nisn != null &&
+                         request.resource.data.registrationNumber != null;
+        
+        // Panitia & Admin Sekolah boleh membaca seluruh data pendaftar
+        allow read: if isPanitiaPPDB(schoolId);
+        
+        // Hanya Panitia & Admin yang boleh mengubah status seleksi atau catatan
+        allow update: if isPanitiaPPDB(schoolId);
+        
+        // Hanya Admin Sekolah yang boleh menghapus data uji coba / spam
+        allow delete: if isSchoolAdmin(schoolId);
+      }
+    }
+  }
+}
